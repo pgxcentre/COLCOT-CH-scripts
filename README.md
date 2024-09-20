@@ -98,6 +98,7 @@ cd ./vep_annovar/
 ### 4 - Chip filtering
 
 Variants were flagged as CHIP (or whitelisted) if they match a pre-specified list of putative CHIP variants as in Vlasschaert et al.
+R version 4.1.2 was used and required packages are listed in [R_session_info.txt](https://github.com/pgxcentre/COLCOT-CH-scripts/blob/main/R_session_info.txt)
 
 ``` bash
 cd ./chip_filtering
