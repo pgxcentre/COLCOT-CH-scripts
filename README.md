@@ -44,7 +44,7 @@ The present repository contains source code and guidelines for execution of impl
 
 ## Clonal Hematopoiesis Sequencing Data Processing
 
-### Clonal Hematopoiesis Genpipes Pipeline
+### Clonal Hematopoiesis Genpipes[1] Pipeline
 
 We implemented the recommended Paragon Unique Molecular Identifiers (UMI) 12 step analysis. After demultiplexing sequencing data, trailing sequencing adapters in the R1 and R2 reads are trimmed using cutadapt v.4.6. Trimmed fastq reads are then converted to unmapped alignment (BAM) files. The 16bp UMI is removed from BAM files to be stored as an alignment tag. Template reads are reconverted to fastq format and mapped against the human genome reference GRCh37 using bwa-mem v.0.7.17. The mapped and unmapped tagged reads are merged and the alignment file (with suffix mapped.umi.bam) is created. The resulting alignments are processed using Fulcrum Genomics’ consensus calling workflow provided by the toolset fgbio v2.2.1. Aligned reads are grouped as read families that appeared to have come from the same original molecule by adjacency strategy and allowing one edit between UMIs (only bases with mapping quality >= 20 are kept). Fgbio CallMolecularConsensusReads is then used to create consensus reads by combining the evidence from reads with the same unique molecular tag: at least 3 reads are required to produce a consensus base. The consensus reads are mapped against the human genome reference using bwa-mem v.0.7.17. Alignment files are filtered to exclude alignments with insert sizes <75 and > 305.
 
@@ -244,3 +244,8 @@ Add pileup counts to original variants file, generate a file with minimum inform
 --annovar_path colcot_CHIP_filtered_DP_20_whitelist_both_visits_w_counts.tsv \
 --output_prefix SGR-2910 > _convert_to_wide.log 2>&1
 ```
+
+
+## References
+
+[1] Bourgey M, Dali R, Eveleigh R, Chen KC, Letourneau L, Fillon J, Michaud M, Caron M, Sandoval J, Lefebvre F, et al. GenPipes: an open-source framework for distributed and scalable genomic analyses. GigaScience. 2019;8. doi: 10.1093/gigascience/giz037
