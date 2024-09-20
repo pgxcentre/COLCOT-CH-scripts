@@ -1,0 +1,64 @@
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(plotly))
+
+# Read filtered file and run descriptive stats 
+filter_all_variants<-function(annovar_path = './',
+                              data.keys = './data.keys',
+                              output_prefix = './w_exclusions',
+			      dp_threshold = 20
+){
+  # Collect whitelist data
+  data <- fread(annovar_path)
+  cat('Annovar raw data: \n')
+  print(data)
+  # Annotations from Essaid
+  data.keys <- fread(data.keys, check.names = TRUE)
+  data.keys <- data.keys %>% distinct( Client.Sample.ID, SAMPLE, Source.Sample.Visit, .keep_all = TRUE)
+  # Variants at baseline / EOS
+  data.colcot <- merge(data,
+                       data.keys, 
+		       by=c('SAMPLE'),
+		       all=F)
+  data.colcot[, variant_Id := Reduce(function(...) paste(..., sep = "_"), .SD), .SDcols=c('CHROM','POS','REF','ALT')]
+  data.colcot[, DP :=as.numeric(DP)]
+  # Filter DP
+  data.colcot.whitelist.variants <- data.colcot[DP >= dp_threshold ,] %>% distinct( Client.Sample.ID, SAMPLE, variant_Id, .keep_all = TRUE)
+  cat('Unique filtered data: \n')
+  print(data.colcot.whitelist.variants)
+  fwrite(data.colcot.whitelist.variants, paste0(output_prefix, "_colcot_filtered_DP_",dp_threshold,".tsv"), sep='\t')
+  # Filter whitelist
+  data.colcot.whitelist.variants <- data.colcot.whitelist.variants[whitelist==TRUE ,] 
+  cat('Unique whitelist data: \n')
+  print(data.colcot.whitelist.variants)
+  fwrite(data.colcot.whitelist.variants, paste0(output_prefix, "_colcot_filtered_DP_",dp_threshold,"_whitelist.tsv"), sep='\t')
+
+}
+
+require(optparse)
+print(sessionInfo())
+
+# Arguments
+option_list <- list(
+  make_option("--annovar_path", type="character", default='./colcot_annovar__chip_all_variants_annovar.tsv',
+              help="path to compiled annovar results file"),
+  make_option("--exclusions_path", type="character", default='./samples_excluded',
+              help="path to a file with samples to be excluded"),
+  make_option("--threshold_dp", type="integer", default=20,
+              help="threshold for variants depth"),
+  make_option("--data_keys", type="character", default="./NovaSeq_Samples_2.csv",
+              help="path to the keys allowing match sequencing IDs with phenotype IDs"),
+  make_option("--output_prefix", type="character", default='./descriptive',
+              help="prefix to the output files, default=./descriptive")
+)
+
+## list of options
+parser <- OptionParser(usage="%prog [options]", option_list=option_list)
+args <- parse_args(parser, positional_arguments = 0)
+params <- args$options
+print(params)
+
+
+filter_all_variants(params$annovar_path, 
+        params$data_keys,
+        params$output_prefix)

@@ -1,0 +1,71 @@
+suppressPackageStartupMessages(library(plotly))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(knitr))
+suppressPackageStartupMessages(library(DT))
+suppressPackageStartupMessages(library(gtsummary))
+suppressPackageStartupMessages(library(forcats))
+suppressPackageStartupMessages(library(broom))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(htmlwidgets))
+suppressPackageStartupMessages(library(DT))
+
+# Read filtered file and write results
+process_file<-function(annovar_path = './',
+					  old_names = NULL,	
+					  new_names = NULL,
+					  output_prefix = './colcot_chip_variants_descriptive',
+                      select_variants = NULL
+
+){
+  # Variants file
+  data.colcot <- fread(annovar_path)
+  # Rename if required
+  if (!is.null(new_names) && !is.null(old_names) && length(new_names)==length(old_names)){
+    old <- unlist(strsplit(old_names, ","))
+    new <- unlist(strsplit(new_names, ","))    
+	setnames(data.colcot, old, new)
+  }
+  # Select and print
+  if (!is.null(select_variants)){
+     sel <- unlist(strsplit(select_variants, ","))
+	 fwrite(data.colcot[,..sel],
+		 paste0(output_prefix, ".tsv"),
+		 sep='\t',
+		 quote=FALSE,
+		 row.names=FALSE)	
+	}
+}
+
+require(optparse)
+
+print(sessionInfo())
+
+# Arguments
+option_list <- list(
+  make_option("--annovar_path", type="character", default='./colcot_annovar__chip_all_variants_annovar.tsv',
+              help="path to compiled annovar results file"),
+  make_option("--old_names", type="character", default=NULL,
+              help="comma separated list of columns to be renamed"),
+  make_option("--new_names", type="character", default=NULL,
+              help="comma separated list of new names for columns to be renamed"),
+  make_option("--output_prefix", type="character", default='./descriptive',
+              help="prefix to the output files, default=./final"),
+  make_option("--select_variants", type="character", default=NULL,
+              help="comma separated of columns to extract")
+
+)
+
+## list of options
+parser <- OptionParser(usage="%prog [options]", option_list=option_list)
+args <- parse_args(parser, positional_arguments = 0)
+params <- args$options
+print(params)
+
+
+process_file(params$annovar_path,
+	params$old_names,
+	params$new_names,
+	params$output_prefix,
+    params$select_variants
+)

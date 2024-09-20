@@ -1,0 +1,378 @@
+#!/usr/env Rscript
+
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(forcats))
+suppressPackageStartupMessages(library(broom))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(htmlwidgets))
+suppressPackageStartupMessages(library(plotly))
+suppressPackageStartupMessages(library(logistf))
+
+tidy.logistf <- function(x, conf.int = FALSE, conf.level = 0.95, exponentiate=FALSE,
+                        ...) {
+      result <- do.call( cbind, list(estimate=x$coefficients,
+                                     n=x$n,
+                                     p.value=x$prob
+                                   )) %>%
+      tibble::as_tibble(rownames = "term")
+    if (conf.int) {
+      ci <- do.call( cbind, list(conf.low=x$ci.lower,
+                                 conf.high=x$ci.upper
+                )) %>%
+        tibble::as_tibble(rownames = "term")
+        result <- dplyr::left_join(result, ci, by = "term")
+        if (exponentiate) {
+              result <- result %>%
+                dplyr::mutate(across(all_of(c('conf.low', 'conf.high')), exp))
+        }
+    }
+    if (exponentiate) {
+      result <- result %>%
+        dplyr::mutate(across(all_of(c('estimate')), exp))
+    }
+    result
+} 
+
+# Regression models
+run_glm<-function(formula.text='status~trt+risk:trt+strata(id)', 
+    data=retinopathy, 
+    verbose=T,
+    random.col = NULL,
+    sample.id.col='SAMPLE',
+    firth.regression = FALSE,
+    ...){
+    if(verbose) print(summary(data))
+    if(!is.null(random.col)){
+        require('lme4')
+        require(broom.mixed)
+        my.regression<-try(glmer(as.formula(formula.text), data=data, ...))
+    }else{
+        if(firth.regression){
+          my.regression<-try(logistf(formula=as.formula(formula.text), 
+          data=data, ...))
+        }else{
+          my.regression<-try(glm(as.formula(formula.text), data=data, ...))
+        }
+    }
+    if(inherits(my.regression, "try-error")){
+      return(data.table(NA))
+    }
+    if(verbose) print(my.regression)
+    if(!is.null(random.col)){
+        res<-try(tidy(my.regression, effects = "fixed", 
+                      exponentiate=T, conf.int=T)) %>%
+                 pivot_wider(names_from = "term",
+                     values_from = c('estimate', 'std.error', 'statistic',
+                     'p.value', 'conf.low', 'conf.high')
+                )
+
+    } else {
+      if(firth.regression){
+          res<-try(tidy.logistf(my.regression, exponentiate=T, conf.int=T)) %>%
+                     pivot_wider(names_from = "term",
+                     values_from = c('estimate', 'p.value', 'conf.low',
+                     'conf.high')
+                   )
+      }else{
+          res<-try(tidy(my.regression, exponentiate=T, conf.int=T)) %>%
+                     pivot_wider(names_from = "term",
+                     values_from = c('estimate', 'std.error', 'statistic',
+                     'p.value', 'conf.low', 'conf.high')
+                  )
+      }
+    }
+  if(!inherits(res, "try-error")){
+    return(cbind(formula.text,res))
+  }else{
+    return(data.table(NA))
+  }
+}
+# Merge model data, execute regression
+run_regression<-function(data,
+                         geno,
+                         samples,
+                         snpid='CHIP',
+                         formula.text,
+                         sample.id.col='samples',
+                         random.col='sample_id',
+                         nb.cores=2,
+                         output.path='output/regression',
+                         verbose=TRUE,
+                         firth.regression = FALSE,
+                         ...)
+{
+  # Merge with all samples sequenced
+  merged_dat<-merge(samples, geno, all.x=TRUE)
+  merged_dat[, c(snpid) := ifelse(is.na(merged_dat$variant_Id), 0, 1)]
+  nsamples <- merged_dat[!is.na(merged_dat$variant_Id), .N]
+  # Merge data and genotypes
+  model.data<-merge(merged_dat, data, by=c('IID'), all=FALSE,
+                    suffixes=c(".geno",""))
+  terms<-unlist(strsplit(formula.text, split = "[/~+ ]+", perl = TRUE ))
+  terms<-terms[terms!=""]
+  nb.non.na <-nrow(na.omit(model.data, cols=terms))
+  if(!is.null(random.col)){
+    # convert to factor and then to numeric for glmer
+      model.data[ , (random.col) := lapply(.SD, factor), 
+                 .SDcols = random.col]
+      model.data[ , (random.col) := lapply(.SD, as.numeric), 
+                 .SDcols = random.col]
+  }
+  cbind(snpid,
+        nsamples,
+        nb.non.na,
+        run_glm(formula.text=formula.text,
+                data=model.data,
+                verbose=verbose,
+                sample.id.col='IID',
+                random.col=random.col,
+                firth.regression=firth.regression,
+                ...)
+  )
+}
+
+count_and_plot<-function(vcf , output.file="fig1_counts_raw"){
+  library(plotly)
+  library(htmlwidgets)
+  fig.data <-vcf[, .(count =uniqueN(.SD)), by = .(SYMBOL)]
+  fig.data <-fig.data[order(-count)]
+  SYMBOL.SORTED.fact<-fig.data[,SYMBOL.sorted:=factor(SYMBOL,
+  levels=unique(fig.data$SYMBOL))]
+  fig.data<-fig.data[order(SYMBOL.sorted,-count)]
+  fig <- fig.data[order(SYMBOL.sorted,-count)] %>%
+    plot_ly(x = ~SYMBOL.sorted, y = ~count, text=~count,
+            color= ~SYMBOL.sorted, textposition = 'outside', type = 'bar') %>%
+    layout(xaxis = list(title = 'SYMBOL'),
+           yaxis = list(title = 'Nb. unique variants'),
+           barmode = 'group')
+  saveWidget(fig, file = paste0(output.file, ".html"))
+}
+
+# Check if artifacts remain and return index for removing
+check_is_artifact<-function(data, output_prefix){
+  known.artifacts <- data.table(rbind(
+                                  cbind(SYMBOL='ASXL1', 
+                                        Accession="NM_015338",
+                                        NonsynOI=list("K236N", "G646Wfs*12", 
+                                                  "P815L")),
+                                  cbind(SYMBOL="TP53",
+                                        Accession="NM_000546",
+                                        NonsynOI=list("P72R", "T377P"))
+                                )
+                                )
+  known.artifacts <- known.artifacts[, lapply(.SD, as.character), 
+                                      .SDcols=colnames(known.artifacts)]
+  which.artifacts <- data[known.artifacts, on=.(SYMBOL, Accession, NonsynOI), 
+                          which = TRUE]
+  # A special case of ASXL1 "G646Wfs*12"
+  candidates.artifacts <- cbind(index=which.artifacts,
+                                data[which.artifacts, .(SYMBOL, NonsynOI, 
+                                      Accession, VAF, variant_Id, SAMPLE)]
+                                )
+  candidates.artifacts[, keep := FALSE]
+  candidates.artifacts[SYMBOL=='ASXL1' & NonsynOI=='G646Wfs*12' & VAF>=0.06, 
+                      keep := TRUE]
+  cat("Removing artifacts: \n")
+  print(candidates.artifacts[keep==FALSE & !is.na(index),])
+  # Write artifacts removed
+  fwrite(candidates.artifacts[keep==FALSE & !is.na(index),],
+        paste0(output_prefix, '_artifacts.csv'),
+        quote=FALSE,
+        sep=",")
+  return(unlist(candidates.artifacts[keep==FALSE & !is.na(index), index]))
+}
+
+# Read filtered file, remove artifacts and run associations
+filter_all_variants<-function(annovar_path = './test.tsv',
+                              genotypes.path='./rs7705526_imputed.raw',
+                              phenotypes.path='./age.csv',
+                              complete.cohort='./chip_samples.txt',
+                              output_prefix = './whitelist_VAFge0.005_VDgt5_unique',
+                              firth.regression = FALSE,
+                              missense.force.path = NULL)
+{
+  # List of samples to use as reference for associations
+  samples <- fread(complete.cohort, header=FALSE, 
+                    col.names=c("IID"), colClasses=c('character'))
+  # Collect whitelist data
+  data.colcot <- fread(annovar_path)
+  cat('Annovar raw data: \n')
+  print(data.colcot)
+  # Filter samples to remove duplicates / low quality samples 
+  data.colcot[, c('IID') := Client.Sample.ID][]
+  data.colcot[, variant_Id := Reduce(function(...) paste(..., sep = "_"), .SD), 
+                .SDcols=c('CHROM','POS','REF','ALT')]
+  data.colcot[, VAF := as.numeric(VAF)]
+  data.colcot[, VD := as.numeric(VD)]
+  # Check artifacts
+  to.remove <- check_is_artifact(data.colcot, output_prefix)
+  # Remove remaining artifacts
+  data.colcot <- data.colcot[-to.remove,]
+  # Filter whitelist
+  data.colcot <- data.colcot[whitelist==TRUE,]
+  # Compute Counts
+  count_and_plot(data.colcot, output.file="fig1_counts_raw")
+  # filter whitelist, VAF , VD and baseline
+  data.colcot.whitelist.unique.variants <- data.colcot[whitelist==TRUE & 
+    VAF >= 0.005 & VD >= 5  & Source.Sample.Visit=='BSL',]
+  cat('Unique whitelist filtered data: \n')
+  print(data.colcot.whitelist.unique.variants)
+  # Select variants present in more than 10 individuals
+  threshold.nb.samples <- 10
+  # Run associations
+  print(table(data.colcot.whitelist.unique.variants$SYMBOL))
+  setindexv(data.colcot.whitelist.unique.variants, 'IID')
+  # Read phenotypes
+  # Participant ID,Age at recruitment  
+  phenotypes<-fread(phenotypes.path, 
+                    sep=",",
+                    col.names=c('subjectnumberstr', 'age'), 
+                    colClasses=c('character', 'numeric'))
+  phenotypes[, IID := paste0('COT-', subjectnumberstr)]
+  setindexv(phenotypes, 'IID')
+  # Read TERT genotype
+  # rs7705526_imputed.raw
+  # FID IID     PAT     MAT     SEX     PHENOTYPE       rs7705526_C
+  genotypes<-fread(genotypes.path, colClasses=c(IID='character'))
+  setindexv(genotypes, 'IID')
+  pheno.data<-merge(genotypes, phenotypes, all=TRUE)
+  cat('Completed merge phenotypes')
+  print(pheno.data)
+  # Select variants present in more than X individuals
+  # and not in the list of missense whitelist variants
+  # Remove artifacts from file
+  if (!is.null(missense.force.path)){
+    missense <- fread(missense.force.path, col.names=c('SYMBOL', 'NonsynOI'))
+    index.cols <- colnames(missense)
+    setindexv(data.colcot.whitelist.unique.variants, index.cols)
+    setindexv(missense, index.cols)
+    cat('Read missense force variants')
+    print(missense)
+    # Force whitelist missense variants
+    which.force <- data.colcot.whitelist.unique.variants[missense, 
+                                                         on=.(SYMBOL, NonsynOI),
+                                                         which = TRUE]
+    variants2force <- data.colcot.whitelist.unique.variants[which.force,
+                                                            variant_Id
+    ]
+  } else {
+    variants2force <-c()
+  }
+
+  selected.variants <- unique(data.colcot.whitelist.unique.variants[, .SD[.N >= threshold.nb.samples], 
+                                        by = .(variant_Id)][,variant_Id])
+  selected.samples <- unique(data.colcot.whitelist.unique.variants[, .SD[.N >= 15], 
+                        by = .(SAMPLE)][,SAMPLE])
+  cat ("variants carried by more than ", threshold.nb.samples,
+        " samples : ", paste(selected.variants, collapse=", "), '\n')
+  # Exclude missense variants of association tests
+  selected.variants <- setdiff(selected.variants,
+                                variants2force)
+  cat ("variants submitted to associations tests ", 
+        paste(selected.variants, collapse=", "), '\n')
+
+  cat ("Samples carrying more than 15 variants : ", 
+        paste(selected.samples, collapse=", "), '\n')
+  print(data.colcot.whitelist.unique.variants[, .SD[.N >= threshold.nb.samples], 
+                                        by = .(variant_Id)])
+  # Run associations with age and TERT
+  res <- rbindlist(
+    lapply(seq_along(selected.variants),
+              function(block){
+                  merge(run_regression(data=pheno.data[,c('IID', 'rs7705526_C')],
+                                       geno=unique(data.colcot.whitelist.unique.variants[variant_Id==selected.variants[block], 
+                                                                                           .(IID, variant_Id, SAMPLE)]),
+                                       samples=samples,
+                                       snpid=paste0("chr", 
+                                          selected.variants[block]),
+                                       formula.text=paste0(paste0("chr", 
+                                          selected.variants[block]), " ~ rs7705526_C "),
+                                        sample.id.col='IID',
+                                        random.col=NULL,
+                                        verbose=TRUE,
+                                        firth.regression=firth.regression,
+                                        family=binomial(link='logit')
+                                        ),
+                          run_regression(data=pheno.data[,c('IID', 'age')],
+                                         geno=unique(data.colcot.whitelist.unique.variants[variant_Id==selected.variants[block], 
+                                                                                           .(IID, variant_Id, SAMPLE)]),
+                                         samples=samples,
+                                         snpid=paste0("chr", 
+                                                 selected.variants[block]),
+                                         formula.text=paste0(paste0("chr", 
+                                                 selected.variants[block]), " ~  age "),
+                                         sample.id.col='IID',
+                                         random.col=NULL,
+                                         verbose=TRUE,
+                                         firth.regression=firth.regression,
+                                         family=binomial(link='logit')
+                                    ),
+                          by='snpid',
+                          all=FALSE,
+                          suffixes = c('.rs7705526_C', '.age')
+                    )
+                }
+  ),
+  fill=TRUE,
+  idcol='snp.idx',
+  )
+  fwrite(res, 
+         paste0(output_prefix,'_associations.csv'), col.names = T, 
+         row.names=FALSE, quote=FALSE, sep=",")
+  remove.variants.idx <- res[! (p.value_rs7705526_C < 0.10 |  p.value_age < 0.10)][,snp.idx]
+  remove.variants <- selected.variants[remove.variants.idx]
+  cat('Variants to remove as not associated to age or TERT: \n')
+  print(remove.variants)
+  # Remove variants not passing tests
+  data.colcot <- data.colcot[!(variant_Id %in% remove.variants), ]
+  count_and_plot(data.colcot,
+                 output.file=paste0(output_prefix,
+                                    "_fig1_counts_after_associations_tert_age")
+                )
+  # Write filtered
+  fwrite(data.colcot,
+        paste0(output_prefix, '_w_association_exclusions.tsv'), 
+        quote=TRUE, 
+        sep="\t")
+  fwrite(res[remove.variants.idx, ],
+         paste0(output_prefix, '_assoc_exclusions.csv'),
+         quote=TRUE, sep=",")
+}
+
+require(optparse)
+print(sessionInfo())
+
+# Arguments
+option_list <- list(
+  make_option(c("-a", "--annovar_path"), type="character", default=NULL,
+    help="path to results file"),
+  make_option(c("-o", "--outputPrefix"), type="character", default='gwas_glmmat.tsv',
+    help="prefix to the output files, default=gwas_glmmat.tsv"),
+  make_option(c("-g","--genotypes_path"), type="character", default=NULL,
+    help="path to the TERT genotype file"),
+  make_option(c("-p","--phenotypes_path"), type="character", default=NULL,
+    help="path to the phenotypes file"),
+  make_option(c("-s","--samples_path"), type="character", default=NULL,
+    help="path to the sample ids file"),
+  make_option(c("-m","--missense_path"), type="character", default=NULL,
+    help="path to the missense variants file, a list of variants exempted 
+          of association tests"),
+  make_option(c("-f","--firth_regression"), action="store_true", default=FALSE,
+    help="Logistic Firth regression")
+)
+
+## List of options
+parser <- OptionParser(usage="%prog [options]", option_list=option_list)
+args <- parse_args(parser, positional_arguments = 0)
+opt <- args$options
+print(opt)
+
+filter_all_variants(annovar_path=opt$annovar_path,
+                    genotypes.path=opt$genotypes_path,
+                    phenotypes.path=opt$phenotypes_path,
+                    complete.cohort=opt$samples_path,
+                    output_prefix=opt$outputPrefix,
+                    firth.regression=opt$firth_regression,
+                    missense.force.path=opt$missense_path
+)

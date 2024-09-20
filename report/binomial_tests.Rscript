@@ -1,0 +1,116 @@
+#!/usr/env Rscript
+
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(forcats))
+suppressPackageStartupMessages(library(broom))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(htmlwidgets))
+suppressPackageStartupMessages(library(plotly))
+
+binomial.test<-function(VD, DP, p=0.5, conf.level=0.95){
+  #cat("params" , paste(VD, DP, p, conf.level, collapse=", "))
+  x=as.numeric(VD)
+  n=as.numeric(DP)
+  p=as.numeric(p)
+  conf.level=conf.level
+  if (any(is.na(c(x, n, p, conf.level)))){
+    return (list(binom.estimate=NaN,
+                 binom.p.value=NaN)) 
+  } 
+  else {
+    btest<-try(binom.test(x=as.numeric(VD), 
+                          n=as.numeric(DP), 
+                          p=as.numeric(p), 
+                          conf.level=conf.level))
+    if(inherits(btest, "try-error")){
+      return (list(binom.estimate=NaN,
+                   binom.p.value=NaN))
+    }else{
+      return(list(binom.estimate=btest$estimate[[1]],
+                  binom.p.value=btest$p.value[[1]]))
+    }
+  }
+  return (list(binom.estimate=NaN,
+               binom.p.value=NaN))
+  
+}
+
+# Read filtered file and run descriptive stats 
+filter_all_variants<-function(annovar_path = './test.tsv',
+                              filter.text='whitelist==TRUE & VAF >= 0.02 & VD >= 5 ',
+                              output_prefix = './whitelist_VAFge0.02_VDgt5_unique',
+                              nonSynOIexclusions = c('H1904R', 'I1873T', 'T1884A')
+){
+  # Collect whitelist data
+  data.colcot <- fread(annovar_path)
+  cat('Annovar raw data: \n')
+  print(data.colcot)
+  data.colcot[, variant_Id := Reduce(function(...) paste(..., sep = "_"), .SD), .SDcols=c('CHROM','POS','REF','ALT')]
+  data.colcot[, VAF := as.numeric(VAF)]
+  data.colcot[, VD := as.numeric(VD)]
+  #data.colcot <- data.colcot %>% distinct(sample_id, variant_Id, .keep_all = T)
+  #cat('Annovar unique data after distinct: \n')
+  #print(data.colcot)
+  # filter whitelist, VAF , VD 
+  if (!is.null(filter.text)){ 
+        data.colcot <- data.colcot[eval(parse(text=filter.text))]
+        cat('Unique whitelist filtered data: \n')
+	print(data.colcot)
+  }
+
+  # Add binomial test for missense variants
+  # cols <- c("binom.estimate", "binom.p.value")
+  results <- unique(data.colcot[ ,.(VD,DP)])
+  results[ , stats := Map(binomial.test, VD, DP)]
+  results <- results[, stats[[1]], by=list(VD,DP)]
+  results[ , binom.p.value := as.numeric(binom.p.value)]
+  cat('Binomial tests: \n')
+  print(results)
+  data.colcot.whitelist.unique.variants <- merge(data.colcot, results, by=c("VD","DP"), all.x=T, all.y=FALSE)
+  data.colcot.whitelist.unique.variants[, fails_binomial_test := binom.p.value >= 0.01 ]
+  data.colcot.whitelist.unique.variants[, exclusion_binomial := (! NonsynOI %in% nonSynOIexclusions) & fails_binomial_test == TRUE]
+  cat('Annovar unique data with binomial test: \n')
+  print(data.colcot.whitelist.unique.variants)
+  # Write results binomial test
+  #cols <- c("SYMBOL","ExonicFunc.refGene", "NonsynOI", "VD", "DP",
+  #          "exclusion_binomial", "fails_binomial_test", "binom.estimate", "binom.p.value")
+  #fwrite(unique(
+  #  data.colcot.whitelist.unique.variants[!is.na(fails_binomial_test),..cols]),
+  #  paste0(output_prefix, '_binomial_tests.tsv'), quote=TRUE, sep="\t" )
+  #data.colcot.whitelist.unique.variants <- data.colcot.whitelist.unique.variants[! exclusion_binomial==TRUE, ]
+  cat('Annovar unique data after filtering binomial: \n')
+  print(data.colcot.whitelist.unique.variants)
+  fwrite(data.colcot.whitelist.unique.variants,  paste0(output_prefix, '_annotated_binomial.tsv'), quote=FALSE, sep="\t")
+
+}
+#filter_all_variants(annovar_path = 'all_samples.annovar.varsOI.allvariants.processed.tsv',
+#                    filter.text='whitelist==TRUE',
+#                    output_prefix = './colcot_whitelist_unique'
+#)
+
+require(optparse) 
+
+print(sessionInfo())
+
+# Arguments 
+option_list <- list(
+  make_option("--annovar_path", type="character", default=NULL,
+    help="path to a file containing variants calls processed"),
+  make_option("--filter_text", type="character", default=NULL,
+    help="text used as filter applied to variants"),
+ make_option("--output_prefix", type="character", default=NULL,
+    help="prefix for the output file")
+)
+
+## list of options
+parser <- OptionParser(usage="%prog [options]", option_list=option_list)
+args <- parse_args(parser, positional_arguments = 0)
+opt <- args$options
+print(opt)
+filter_all_variants(annovar_path = opt$annovar_path,
+                    filter.text=opt$filter_text,
+                    output_prefix = opt$output_prefix
+)
+
+

@@ -1,0 +1,220 @@
+#!/usr/bin/env Rscript 
+
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(plotly))
+
+# Compile vardict counts 
+rbindlist_fread_vcf <- function(path, 
+                       pattern = ".AF_consensus.vardict.vcf.gz.vcf.gz$", 
+                       ...) {
+  flist = list.files(path, pattern, full.names = TRUE, recursive=T )
+  names(flist)<-unlist(lapply(flist, function(y) basename(y)))
+  rbindlist(lapply(flist, 
+                   function(x) fread(file=x,
+                                     sep='\t',
+                                     header = TRUE,
+                                     skip = '#CHROM')),
+            fill= T,
+            idcol='sample_name')
+}
+
+rbindlist_fread <- function(path,
+                       pattern = ".AF_consensus.vardict.tsv$",
+                       ...) {
+  flist = list.files(path, pattern, full.names = TRUE, recursive=T )
+  names(flist)<-unlist(lapply(flist, function(y) basename(y)))
+  rbindlist(lapply(flist,
+                   function(x) fread(file=x,
+                                     sep='\t',
+                                     header = FALSE,
+                                     ...
+                                    )
+                   ),
+            fill= T,
+            idcol='sample_name')
+}
+
+# Read filtered file and run descriptive stats 
+add_counts_to_variants_per_visit <- function(annovar_path = './',
+                              data.keys = './data.keys',
+                              counts_path = 'output',
+                              pattern = ".AF_consensus.vardict.vcf.gz.vcf.gz$",
+                              output_prefix = './w_counts.csv'
+){
+  # Collect whitelist data
+  data <- fread(annovar_path)
+  cat('Annovar raw data: \n')
+  print(data)
+
+  # Annotations from Essaid
+  data.keys <- fread(data.keys, check.names = TRUE)
+  data.keys <- data.keys %>% distinct(Client.Sample.ID, SAMPLE,
+                                      Source.Sample.Visit,
+                                      .keep_all = TRUE)
+  
+  # Variants at baseline
+  data.per.visit <- merge(data,
+                         data.keys,
+	                       by=c('SAMPLE'),
+		                     all=FALSE)
+  data.per.visit [ , c("CHROM", "POS", "REF", "ALT") := tstrsplit(variant_ID,
+                                                                  "_",
+                                                                  fixed=TRUE)]
+  cat("Completed data merge : ")
+  print(data.per.visit)
+  
+  # Participants that have baseline and eos measurements
+  data.keys.to.wide<-dcast(data.keys,
+                          Client.Sample.ID ~ Source.Sample.Visit,
+                          value.var = c("SAMPLE"), drop=FALSE)
+  select.samples <- data.keys.to.wide[!is.na(BSL) & !is.na(EOS),
+                                      Client.Sample.ID]
+  # Convert to numeric
+  cols <- c("CHROM", "POS")
+  data.per.visit[, (cols) := lapply(.SD, as.numeric), .SDcols = cols]
+  data.subset <- data.per.visit[Client.Sample.ID %in% select.samples,]
+  
+  # Read tabixed vcf
+  cnames <- c("CHROM", "POS", "ID", "REF", "ALT", "QUAL", "FILTER", "INFO",
+              "FORMAT", "CALL")
+  vcf <- rbindlist_fread(counts_path, pattern, col.names=cnames)
+  print(vcf)
+  # Extract sample names
+  k <- "SAMPLE"
+  # bad luck the R library in Narval does not contain str_extract with groups
+  #vcf[ , (k) := str_extract(INFO, paste0(k, "=([\\w]+)+;.*"), group=1)]
+  vcf[ , SAMPLE := tstrsplit(INFO, ";", fixed=TRUE, keep=1)]
+  vcf[ , SAMPLE := gsub("SAMPLE=", "", SAMPLE)]
+  vcf[, (cols) := lapply(.SD, as.numeric), .SDcols = cols]
+  # Extract calls
+  format.names <- unlist(strsplit(vcf[!is.na(FORMAT), FORMAT][1], ":"))
+  calls <- vcf[, tstrsplit(CALL, ":", fixed=TRUE)]
+  vcf[, (format.names) := calls]
+  cat("Completed vcf read : ")
+  print(vcf)
+
+  # Merge count info for all variants called
+  setkeyv(data.subset, c("SAMPLE", "CHROM", "POS", "REF", "ALT"))
+  setkeyv(vcf, c("SAMPLE", "CHROM", "POS", "REF", "ALT"))
+  results<-merge(data.subset,
+                  vcf,
+                  by=c("SAMPLE", "CHROM", "POS", "REF", "ALT"),
+                  suffixes=c("", "_counts"),
+                  all.x=TRUE,
+                  all.y=FALSE
+                )
+  fwrite(results, paste0(output_prefix, "_w_counts.tsv"),
+	 sep='\t', quote=F, row.names=FALSE)
+  # Mising calls
+  # Set the ON clause as keys of the tables:
+  data.nocalls <- split(data.subset[, .(Source.Sample.Visit, 
+                                      Client.Sample.ID, variant_ID, 
+                                      SAMPLE)], 
+                     list(data.subset$Source.Sample.Visit))
+  # Set keys
+  lapply(data.nocalls, function(x) setkeyv(x, c('Client.Sample.ID',
+                                               'variant_ID')))
+  # Perform the join, retain only NA from matched cols on both side
+  Result <- merge(data.nocalls$BSL, data.nocalls$EOS, 
+                 by=c('Client.Sample.ID',
+                      'variant_ID'),
+                 all=TRUE,
+                 allow.cartesian=TRUE, 
+                 suffixes=c('_BSL', '_EOS'))
+  Result <- Result[is.na(Source.Sample.Visit_BSL) | is.na(Source.Sample.Visit_EOS)]
+  # Merge with keys
+  Result<- merge(Result, 
+                data.keys.to.wide[!is.na(BSL) & !is.na(EOS)],
+                by=c('Client.Sample.ID'), all.x=T, all.y=F)
+
+  vars_to_check <- list(BSL=Result[is.na(SAMPLE_BSL),  .(Client.Sample.ID,
+                                                          variant_ID, BSL)],
+                       EOS=Result[is.na(SAMPLE_EOS),  .(Client.Sample.ID,
+                                                        variant_ID, EOS)]
+                       )
+  # Create a list of data.tables
+  vars_to_check <- lapply(vars_to_check, function(x) setnames(x, 
+                                                      c('Client.Sample.ID',
+                                                        'variant_ID', 'SAMPLE')
+                                                        ))
+  all.vars <- rbindlist(vars_to_check, fill=T, idcol='Source.Sample.Visit')
+  all.vars[, c('CHROM','POS') := tstrsplit(variant_ID, "_", keep=c(1,2))]
+  all.vars[, CHROM := as.numeric(CHROM)]
+  all.vars[, POS := as.numeric(POS)]
+  # Get vardict results for the given positions
+  results.missing <- merge(all.vars,
+                  vcf,
+                  by=c('SAMPLE', 'CHROM', 'POS'),
+                  all.x=TRUE,
+                  all.y=FALSE,
+                  allow.cartesian=TRUE,
+                  suffixes=c("", "_counts")
+                  )
+  cat("Completed merge of missing variants at BSL or EOS : ")
+  print(results)
+  fwrite(results.missing, paste0(output_prefix, "_missing_w_counts.tsv"),
+	  sep='\t', quote=F, row.names=FALSE)
+
+  results.missing[, match.allele := tstrsplit(variant_ID, "_", keep=3L)]
+  results.missing[, alt.null := ALT=="."]
+  results.missing[, same.ref := REF == match.allele]
+  # Prioritize variants by reference allele, homozogous reference call
+  results.missing <- results.missing[ order(SAMPLE, variant_ID, 
+            POS, -same.ref, -alt.null) ]
+  # Select only one 
+  results.missing <- results.missing %>% distinct(SAMPLE,variant_ID,
+                                      .keep_all = TRUE)
+  fwrite(results.missing, paste0(output_prefix, "_missing_reduced.tsv"),
+	  sep='\t', quote=FALSE, row.names=FALSE)
+  # Merge                      by=.(SAMPLE, variant_ID)]
+  complete <- rbindlist(list(called=results,
+                        missing=results.missing),
+                        fill=T,
+                        idcol='status')
+
+  # Change NA to zero
+  cols = c('VD','DP', 'AF')
+  complete[, VD := as.numeric(VD)]
+  complete[, DP := as.numeric(DP)]
+  complete[, AF := as.numeric(AF)]
+  complete[ , (cols) := lapply(.SD, nafill, fill=0), .SDcols = cols]
+  cat("Completed merge of callend missing variants at BSL or EOS : ")
+  print(complete)
+  fwrite(complete, paste0(output_prefix, "_both_visits_w_counts.tsv"),
+	  sep='\t', quote=FALSE, row.names=FALSE)
+}
+
+require(optparse)
+print(sessionInfo())
+
+# Arguments
+option_list <- list(
+  make_option("--annovar_path", type="character", 
+              default='./colcot_annovar__chip_all_variants_annovar.tsv',
+              help="path to compiled annovar results file"),
+  make_option("--data_keys", type="character", 
+              default="./NovaSeq_Samples_2.csv",
+              help="path to the keys allowing match sequencing IDs with phenotype IDs"),
+  make_option("--counts_path", type="character", default='./output',
+              help="path to filtered counts file, default=./output"),
+  make_option("--pattern", type="character", 
+              default='.AF_consensus.vardict.tsv$',
+              help="pattern to select a list of counts files, 
+              default=.AF_consensus.vardict.tsv$"),
+  make_option("--output_prefix", type="character",
+              default='./per_visit',
+              help="prefix to the output files, default=./per_visit")
+)
+
+## list of options
+parser <- OptionParser(usage="%prog [options]", option_list=option_list)
+args <- parse_args(parser, positional_arguments = 0)
+params <- args$options
+print(params)
+
+add_counts_to_variants_per_visit(params$annovar_path, 
+      	params$data_keys,
+        params$counts_path,
+        params$pattern,
+        params$output_prefix)

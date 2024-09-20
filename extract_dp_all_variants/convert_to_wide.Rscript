@@ -1,0 +1,95 @@
+#!/usr/bin/env Rscript 
+
+suppressPackageStartupMessages(library(stringr))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(knitr))
+
+
+# Read filtered file and run descriptive stats 
+variants_to_wide <- function(annovar_path = './',
+                              output_prefix = './w_counts.csv'
+){
+    # Read input file
+    data<-fread(annovar_path)
+    # As we have the same number of variants per sample, let's check variants 
+    # selected
+    print(data)
+    cat("\nNOTICE: counts of missing variants with genotype != 0/0\n")
+    stats <- data[status=='missing' & GT!='0/0', .N, by=.(GT,
+                                                same.ref, 
+                                                alt.null)][order(-N)]
+    print(stats)
+    cat("\nNOTICE: counts of missing variants with any genotype\n")
+    stats <- data[status=='missing',
+                  .N, 
+                  by=.(GT, same.ref, alt.null)][order(-N)]
+    print(stats)
+    stats.af<-summary(data[status=='missing' & GT=='0/0', AF])
+    cat("\nNOTICE: stats for missing variants\n")
+    print(stats.af)
+    # Assign zeros if reference is not the same, keep only DP
+    data[status=='missing', VD_missing := VD]
+    data[status=='missing', AF_missing := AF]
+    data[status=='missing', REF_ALT_missing := paste0(REF,"_",ALT)]
+    data[status=='missing' & GT=='0/0', VD:=0]
+    data[status=='missing' & GT=='0/0', AF:=0.0]
+    data[status=='missing' & GT!='0/0', VD:=0]
+    data[status=='missing' & GT!='0/0', AF:=0.0]
+
+    # Check if DP is most informative in  INFO
+    cols.to.keep<-c('Client.Sample.ID','Source.Sample.Visit', 'SAMPLE', 
+                'variant_ID', 'DP', 'VD', 'AF', 'status', 'GT', 
+                'VD_missing','AF_missing', 'REF_ALT_missing')
+    final.data<-data[,..cols.to.keep]
+    fwrite(final.data, 
+       paste0(output_prefix, '_for_validation.csv'),
+       quote=F,
+       row.names=F,
+       sep=',')
+    # Reshape for MP
+    data.to.wide<-dcast(data,
+                    Client.Sample.ID + variant_ID ~ Source.Sample.Visit,
+                    value.var = c('SAMPLE', 'DP', 'VD', 'AF', 'status'), 
+                    drop=c(TRUE,FALSE))
+    # Rename columns
+    old_names<-c('SAMPLE_BSL','SAMPLE_EOS','DP_BSL','DP_EOS',
+                         'VD_BSL','VD_EOS','AF_BSL','AF_EOS',
+                         'status_BSL','status_EOS')
+    new_names<-unlist(lapply(old_names, function(x) paste(rev(unlist(strsplit(x,
+                                                                   "_", 
+                                                                   fixed=T))), 
+                                                collapse = "_"))
+            )
+    setnames(data.to.wide, old_names, new_names)
+    sorted.names<-c('Client.Sample.ID','variant_ID',
+                grep("BSL" , colnames(data.to.wide), value=TRUE),
+                grep("EOS" , colnames(data.to.wide), value=TRUE))
+    fwrite(data.to.wide[,..sorted.names], 
+       paste0(output_prefix, '.csv'),
+       quote=F,
+       row.names=F,
+       sep=',')
+}
+
+require(optparse)
+print(sessionInfo())
+
+# Arguments
+option_list <- list(
+  make_option("--annovar_path", type="character", 
+              default='./colcot_annovar__chip_all_variants_annovar.tsv',
+              help="path to compiled annovar results file"),
+  make_option("--output_prefix", type="character",
+              default='./per_visit',
+              help="prefix to the output files, default=./per_visit")
+)
+
+## list of options
+parser <- OptionParser(usage="%prog [options]", option_list=option_list)
+args <- parse_args(parser, positional_arguments = 0)
+params <- args$options
+print(params)
+
+variants_to_wide(params$annovar_path, 
+        params$output_prefix)
